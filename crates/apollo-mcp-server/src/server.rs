@@ -45,6 +45,8 @@ pub struct Server {
     index_memory_bytes: usize,
     health_check: HealthCheckConfig,
     cors: CorsConfig,
+    #[cfg(feature = "apps")]
+    ui_apps_specs: Vec<crate::apps::SpecFormat>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
@@ -132,6 +134,9 @@ impl Server {
         index_memory_bytes: usize,
         health_check: HealthCheckConfig,
         cors: CorsConfig,
+        #[cfg(feature = "apps")]
+        #[builder(default = vec![crate::apps::SpecFormat::OpenAi])]
+        ui_apps_specs: Vec<crate::apps::SpecFormat>,
     ) -> Self {
         let headers = {
             let mut headers = headers.clone();
@@ -162,6 +167,8 @@ impl Server {
             index_memory_bytes,
             health_check,
             cors,
+            #[cfg(feature = "apps")]
+            ui_apps_specs,
         }
     }
 

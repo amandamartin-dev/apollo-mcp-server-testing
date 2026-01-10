@@ -77,6 +77,7 @@ async fn execute_app(
     Ok(nest_app_tool_result(
         result,
         &tool.tool.name,
+        &app.name,
         prefetch_results,
     ))
 }
@@ -86,6 +87,7 @@ async fn execute_app(
 fn nest_app_tool_result(
     mut result: CallToolResult,
     tool_name: &str,
+    app_name: &str,
     prefetch_results: Vec<(String, CallToolResult)>,
 ) -> CallToolResult {
     if let Some(structured_content) = result.structured_content.take() {
@@ -110,10 +112,20 @@ fn nest_app_tool_result(
             vec![Content::json(&wrapped).unwrap_or(Content::text(wrapped.to_string()))];
         result.structured_content = Some(wrapped);
 
-        // Attach tool name to the result meta
+        // Attach tool name and UI resource URI to the result meta
         result.meta = Some({
             let mut meta = Meta::new();
             meta.insert("toolName".into(), Value::String(tool_name.to_string()));
+
+            // Add UI resource URI for Goose MCP Apps support
+            let resource_uri = format!("ui://mcp/{}", app_name);
+            let mut ui_meta = Map::new();
+            ui_meta.insert("resourceUri".to_string(), Value::String(resource_uri.clone()));
+            meta.insert("ui".into(), Value::Object(ui_meta));
+
+            // BACKWARD COMPATIBILITY: Add deprecated format for Goose v1.19.0
+            meta.insert("ui/resourceUri".into(), Value::String(resource_uri));
+
             meta
         });
     }
@@ -237,6 +249,7 @@ mod tests {
             tools: vec![AppTool {
                 operation: primary_operation.clone(),
                 tool: Tool::new("ATool", "", JsonObject::new()),
+                visibility: vec![crate::apps::ToolVisibility::Model, crate::apps::ToolVisibility::App],
             }],
             prefetch_operations: vec![
                 PrefetchOperation {
@@ -328,6 +341,7 @@ mod tests {
                         .unwrap(),
                 ),
                 tool: Tool::new("GetId", "a description", JsonObject::new()),
+                visibility: vec![crate::apps::ToolVisibility::Model, crate::apps::ToolVisibility::App],
             }],
             prefetch_operations: vec![],
         };
@@ -376,6 +390,7 @@ mod tests {
                         .unwrap(),
                 ),
                 tool: Tool::new("GetId", "a description", JsonObject::new()),
+                visibility: vec![crate::apps::ToolVisibility::Model, crate::apps::ToolVisibility::App],
             }],
             prefetch_operations: vec![],
         };
@@ -416,6 +431,7 @@ mod tests {
                         .unwrap(),
                 ),
                 tool: Tool::new("GetId", "a description", JsonObject::new()),
+                visibility: vec![crate::apps::ToolVisibility::Model, crate::apps::ToolVisibility::App],
             }],
             prefetch_operations: vec![],
         };

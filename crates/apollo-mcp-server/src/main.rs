@@ -148,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
         .index_memory_bytes(config.introspection.search.index_memory_bytes)
         .health_check(config.health_check)
         .cors(config.cors)
+        .maybe_ui_apps_specs(config.ui_apps.as_ref().map(|ui| ui.specs.clone()))
         .build()
         .start()
         .await?)

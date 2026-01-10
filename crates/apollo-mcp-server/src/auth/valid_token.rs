@@ -455,8 +455,9 @@ mod test {
         };
 
         let token = jwt.token().to_string();
-        assert_eq!(test_validator.validate(jwt).await.unwrap().0.token(), token);
+        assert_eq!(test_validator.validate(jwt).await.unwrap().token.token(), token);
     }
+
 
     #[traced_test]
     #[tokio::test]

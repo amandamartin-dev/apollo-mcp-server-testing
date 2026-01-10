@@ -28,7 +28,7 @@ use crate::meter;
 use crate::operations::{execute_operation, find_and_execute_operation};
 use crate::server::states::telemetry::get_parent_span;
 use crate::{
-    apps::AppResource,
+    apps::{AppResource, SpecFormat, ToolVisibility},
     custom_scalar_map::CustomScalarMap,
     errors::McpError,
     explorer::{EXPLORER_TOOL_NAME, Explorer},
@@ -42,12 +42,14 @@ use crate::{
     },
     operations::{MutationMode, Operation, RawOperation},
 };
+use serde_json::json;
 
 #[derive(Clone)]
 pub(super) struct Running {
     pub(super) schema: Arc<RwLock<Valid<Schema>>>,
     pub(super) operations: Arc<RwLock<Vec<Operation>>>,
     pub(super) apps: Vec<crate::apps::App>,
+    pub(super) ui_apps_specs: Vec<SpecFormat>,
     pub(super) headers: HeaderMap,
     pub(super) forward_headers: ForwardHeaders,
     pub(super) endpoint: Url,
@@ -209,46 +211,78 @@ impl Running {
                     .map(|(_, value)| value.into_owned())
             });
 
-        // If we get the app param, we'll run in a special "app mode" where we only expose the tools for that app (+execute)
-        if let Some(app_name) = app_param {
-            let app = self.apps.iter().find(|app| app.name == app_name);
+        // Determine active spec based on config and request
+        let active_spec = self.determine_active_spec(&extensions);
 
-            match app {
-                Some(app) => {
-                    return Ok(ListToolsResult {
-                        next_cursor: None,
-                        tools: self
-                            .operations
-                            .read()
-                            .await
-                            .iter()
-                            .map(|op| op.as_ref().clone())
-                            .chain(
-                                self.execute_tool
-                                    .as_ref()
-                                    .iter()
-                                    // When running apps, make the execute tool executable from the app but hidden from the LLM via meta entry on the tool. This prevents the LLM from using the execute tool by limiting it only to the app tools.
-                                    .map(|e| make_tool_private(e.tool.clone())),
-                            )
-                            .chain(
-                                app.tools
-                                    .iter()
-                                    .map(|tool| tool.tool.clone())
-                                    .collect::<Vec<_>>(),
-                            )
-                            .collect(),
-                    });
+        // If we get the app param and OpenAI spec is active, run in OpenAI "app mode"
+        if let Some(app_name) = app_param && active_spec == SpecFormat::OpenAi {
+                let app = self.apps.iter().find(|app| app.name == app_name);
+
+                match app {
+                    Some(app) => {
+                        return Ok(ListToolsResult {
+                            next_cursor: None,
+                            tools: self
+                                .operations
+                                .read()
+                                .await
+                                .iter()
+                                .map(|op| op.as_ref().clone())
+                                .chain(
+                                    self.execute_tool
+                                        .as_ref()
+                                        .iter()
+                                        // When running apps, make the execute tool executable from the app but hidden from the LLM via meta entry on the tool. This prevents the LLM from using the execute tool by limiting it only to the app tools.
+                                        .map(|e| make_tool_private(e.tool.clone())),
+                                )
+                                .chain(
+                                    app.tools
+                                        .iter()
+                                        .map(|tool| tool.tool.clone())
+                                        .collect::<Vec<_>>(),
+                                )
+                                .collect(),
+                        });
+                    }
+                    None => {
+                        return Err(McpError::new(
+                            ErrorCode::INVALID_REQUEST,
+                            format!("App {app_name} not found"),
+                            None,
+                        ));
+                    }
                 }
-                None => {
-                    return Err(McpError::new(
-                        ErrorCode::INVALID_REQUEST,
-                        format!("App {app_name} not found"),
-                        None,
-                    ));
-                }
-            }
         }
 
+        // Route based on active spec
+        match active_spec {
+            SpecFormat::OpenAi => {
+                // OpenAI default: no app tools in list
+                Ok(ListToolsResult {
+                    next_cursor: None,
+                    tools: self
+                        .operations
+                        .read()
+                        .await
+                        .iter()
+                        .map(|op| op.as_ref().clone())
+                        .chain(self.execute_tool.as_ref().iter().map(|e| e.tool.clone()))
+                        .chain(self.introspect_tool.as_ref().iter().map(|e| e.tool.clone()))
+                        .chain(self.search_tool.as_ref().iter().map(|e| e.tool.clone()))
+                        .chain(self.explorer_tool.as_ref().iter().map(|e| e.tool.clone()))
+                        .chain(self.validate_tool.as_ref().iter().map(|e| e.tool.clone()))
+                        .collect(),
+                })
+            }
+            SpecFormat::McpApps => {
+                // MCP Apps: include app tools with Model visibility
+                self.list_tools_mcp_apps_mode().await
+            }
+        }
+    }
+
+    /// List tools for MCP Apps spec - includes app tools with Model visibility
+    async fn list_tools_mcp_apps_mode(&self) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
             next_cursor: None,
             tools: self
@@ -262,13 +296,78 @@ impl Running {
                 .chain(self.search_tool.as_ref().iter().map(|e| e.tool.clone()))
                 .chain(self.explorer_tool.as_ref().iter().map(|e| e.tool.clone()))
                 .chain(self.validate_tool.as_ref().iter().map(|e| e.tool.clone()))
+                // Add app tools that are visible to "model"
+                .chain(
+                    self.apps
+                        .iter()
+                        .flat_map(|app| {
+                            app.tools.iter().filter_map(|app_tool| {
+                                // Only include if visibility includes "model"
+                                if app_tool.visibility.contains(&ToolVisibility::Model) {
+                                    Some(app_tool.tool_for_spec(
+                                        SpecFormat::McpApps,
+                                        &app.name,
+                                        app.uri.as_ref(),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                )
                 .collect(),
         })
     }
 
+    /// Check if the caller is an app (vs an agent/model)
+    ///
+    /// TODO: MCP spec doesn't currently define how to distinguish app vs agent callers.
+    /// For now, we default to false (treat all callers as agents).
+    /// This means visibility: ["app"] tools are hidden from tools/list and cannot be called.
+    /// Future MCP spec versions may add caller identification headers or capabilities.
+    #[allow(dead_code)]
+    fn is_app_caller(&self, _extensions: &Extensions) -> bool {
+        // MCP spec doesn't yet define how to detect app vs agent callers
+        // Default to false (all callers are agents unless proven otherwise)
+        // This means visibility: ["app"] blocks LLM access as intended
+        false
+    }
+
+    /// Determine which spec format to use based on configuration and request
+    fn determine_active_spec(&self, extensions: &Extensions) -> SpecFormat {
+        // If only one spec configured, use it
+        if self.ui_apps_specs.len() == 1 {
+            return *self.ui_apps_specs.first().unwrap_or(&SpecFormat::OpenAi);
+        }
+
+        // Check for OpenAI-specific ?app= pattern
+        let has_app_param = extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.uri.query())
+            .map(|q| q.contains("app="))
+            .unwrap_or(false);
+
+        // If ?app= present and OpenAI enabled, use OpenAI
+        if has_app_param && self.ui_apps_specs.contains(&SpecFormat::OpenAi) {
+            return SpecFormat::OpenAi;
+        }
+
+        // Prefer MCP Apps if available (it's the newer spec)
+        if self.ui_apps_specs.contains(&SpecFormat::McpApps) {
+            return SpecFormat::McpApps;
+        }
+
+        // Fallback to first configured spec
+        self.ui_apps_specs.first().copied().unwrap_or(SpecFormat::OpenAi)
+    }
+
     fn list_resources_impl(&self) -> ListResourcesResult {
         ListResourcesResult {
-            resources: self.apps.iter().map(|app| app.resource()).collect(),
+            resources: self.apps.iter()
+                .flat_map(|app| {
+                    self.ui_apps_specs.iter().map(move |spec| app.resource_for_spec(*spec))
+                })
+                .collect(),
             next_cursor: None,
         }
     }
@@ -284,16 +383,20 @@ impl Running {
             )
         })?;
 
-        let Some(app) = self
-            .apps
-            .iter()
-            .find(|app| app.uri.path() == request_uri.path())
-        else {
+        // Detect spec from URI to determine metadata format
+        let spec = if request.uri.contains("ui://mcp/") {
+            SpecFormat::McpApps
+        } else {
+            SpecFormat::OpenAi
+        };
+
+        let Some(app) = self.apps.iter().find(|app| app.uri.path() == request_uri.path()) else {
             return Err(ErrorData::resource_not_found(
                 format!("Resource not found for URI: {}", request.uri),
                 None,
             ));
         };
+
         let text = match &app.resource {
             AppResource::Local(contents) => contents.clone(),
             AppResource::Remote(url) => {
@@ -328,40 +431,81 @@ impl Running {
             }
         };
 
-        let mut meta: Option<Meta> = None;
-        if let Some(csp) = &app.csp_settings {
-            meta.get_or_insert_with(Meta::new).insert(
-                "openai/widgetCSP".into(),
-                serde_json::to_value(csp).unwrap_or_default(),
-            );
-        }
-        if let Some(widget_settings) = &app.widget_settings {
-            if let Some(description) = &widget_settings.description {
-                meta.get_or_insert_with(Meta::new).insert(
-                    "openai/widgetDescription".into(),
-                    serde_json::to_value(description).unwrap_or_default(),
-                );
-            }
+        // Generate spec-specific MIME type and metadata
+        let (mime_type, meta) = match spec {
+            SpecFormat::OpenAi => {
+                let mut meta = Meta::new();
 
-            if let Some(domain) = &widget_settings.domain {
-                meta.get_or_insert_with(Meta::new).insert(
-                    "openai/widgetDomain".into(),
-                    serde_json::to_value(domain).unwrap_or_default(),
-                );
-            }
+                // Add CSP settings if present
+                if let Some(csp) = &app.csp_settings {
+                    meta.insert(
+                        "openai/widgetCSP".into(),
+                        serde_json::to_value(csp).unwrap_or_default(),
+                    );
+                }
 
-            if let Some(prefers_border) = &widget_settings.prefers_border {
-                meta.get_or_insert_with(Meta::new).insert(
-                    "openai/widgetPrefersBorder".into(),
-                    serde_json::to_value(prefers_border).unwrap_or_default(),
-                );
-            }
-        }
+                // Add widget settings if present
+                if let Some(widget_settings) = &app.widget_settings {
+                    if let Some(description) = &widget_settings.description {
+                        meta.insert(
+                            "openai/widgetDescription".into(),
+                            serde_json::to_value(description).unwrap_or_default(),
+                        );
+                    }
+                    if let Some(domain) = &widget_settings.domain {
+                        meta.insert(
+                            "openai/widgetDomain".into(),
+                            serde_json::to_value(domain).unwrap_or_default(),
+                        );
+                    }
+                    if let Some(prefers_border) = &widget_settings.prefers_border {
+                        meta.insert(
+                            "openai/widgetPrefersBorder".into(),
+                            serde_json::to_value(prefers_border).unwrap_or_default(),
+                        );
+                    }
+                }
+
+                let meta_opt = if meta.is_empty() { None } else { Some(meta) };
+                ("text/html+skybridge", meta_opt)
+            },
+            SpecFormat::McpApps => (
+                "text/html;profile=mcp-app",
+                {
+                    let mut meta = Meta::new();
+                    let mut ui_meta = serde_json::Map::new();
+
+                    // MCP spec uses nested ui.csp structure with default deny-all
+                    if let Some(csp) = &app.csp_settings {
+                        let mut csp_map = serde_json::Map::new();
+                        if let Some(connect) = &csp.connect_domains {
+                            csp_map.insert("connectDomains".to_string(), json!(connect));
+                        }
+                        if let Some(resource) = &csp.resource_domains {
+                            csp_map.insert("resourceDomains".to_string(), json!(resource));
+                        }
+                        if !csp_map.is_empty() {
+                            ui_meta.insert("csp".to_string(), Value::Object(csp_map));
+                        }
+                    } else {
+                        // Default: deny all
+                        ui_meta.insert("csp".to_string(), json!({
+                            "connectDomains": [],
+                            "resourceDomains": []
+                        }));
+                    }
+
+                    ui_meta.insert("prefersBorder".to_string(), json!(true));
+                    meta.insert("ui".to_string(), Value::Object(ui_meta));
+                    Some(meta)
+                },
+            ),
+        };
 
         Ok(ReadResourceResult {
             contents: vec![ResourceContents::TextResourceContents {
                 uri: request.uri,
-                mime_type: Some("text/html+skybridge".to_string()),
+                mime_type: Some(mime_type.to_string()),
                 text,
                 meta,
             }],
@@ -480,8 +624,9 @@ impl ServerHandler for Running {
             .await
             {
                 res
-            } else if let Some(app_name) = app_param
-                && let Some(res) = find_and_execute_app(
+            } else if let Some(app_name) = app_param {
+                // OpenAI Apps mode: app name from ?app= parameter
+                find_and_execute_app(
                     &self.apps,
                     &app_name,
                     &tool_name,
@@ -490,8 +635,24 @@ impl ServerHandler for Running {
                     &self.endpoint,
                 )
                 .await
-            {
-                res
+                .unwrap_or_else(|| Err(tool_not_found(&tool_name)))
+            } else if tool_name.contains("--") {
+                // MCP Apps mode: app name is prefix before "--"
+                let parts: Vec<&str> = tool_name.splitn(2, "--").collect();
+                if parts.len() == 2 {
+                    find_and_execute_app(
+                        &self.apps,
+                        parts[0],
+                        &tool_name,
+                        &headers,
+                        request.arguments.as_ref(),
+                        &self.endpoint,
+                    )
+                    .await
+                    .unwrap_or_else(|| Err(tool_not_found(&tool_name)))
+                } else {
+                    Err(tool_not_found(&tool_name))
+                }
             } else {
                 Err(tool_not_found(&tool_name))
             }
@@ -616,6 +777,7 @@ mod tests {
             schema: Arc::new(RwLock::new(schema)),
             operations: operations.clone(),
             apps: vec![],
+            ui_apps_specs: vec![SpecFormat::OpenAi],
             headers: HeaderMap::new(),
             forward_headers: vec![],
             endpoint: "http://localhost:4000".parse().unwrap(),
@@ -675,6 +837,7 @@ mod tests {
             schema: schema.clone(),
             operations: Arc::new(RwLock::new(vec![])),
             apps: vec![],
+            ui_apps_specs: vec![SpecFormat::OpenAi],
             headers: HeaderMap::new(),
             forward_headers: vec![],
             endpoint: "http://localhost:4000".parse().unwrap(),
@@ -738,6 +901,7 @@ mod tests {
                         .unwrap(),
                 ),
                 tool: Tool::new("GetId", "a description", JsonObject::new()),
+                visibility: vec![ToolVisibility::Model, ToolVisibility::App], // Default visibility
             }],
             resource,
             uri: RESOURCE_URI.parse().unwrap(),
@@ -750,6 +914,7 @@ mod tests {
             schema: Arc::new(RwLock::new(schema)),
             operations: Arc::new(RwLock::new(vec![])),
             apps: vec![app],
+            ui_apps_specs: vec![SpecFormat::OpenAi],
             headers: HeaderMap::new(),
             forward_headers: vec![],
             endpoint: "http://localhost:4000".parse().unwrap(),

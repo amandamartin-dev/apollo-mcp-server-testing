@@ -54,6 +54,8 @@ struct Config {
     index_memory_bytes: usize,
     health_check: HealthCheckConfig,
     cors: CorsConfig,
+    #[cfg(feature = "apps")]
+    ui_apps_specs: Vec<crate::apps::SpecFormat>,
 }
 
 impl StateMachine {
@@ -90,6 +92,8 @@ impl StateMachine {
                 index_memory_bytes: server.index_memory_bytes,
                 health_check: server.health_check,
                 cors: server.cors,
+                #[cfg(feature = "apps")]
+                ui_apps_specs: server.ui_apps_specs,
             },
         });
 

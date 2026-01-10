@@ -91,6 +91,7 @@ pub struct Config {
     #[serde(default)]
     pub allow_any_audience: bool,
 
+
     /// The resource to protect.
     ///
     /// Note: This is usually the publicly accessible URL of this running MCP server
@@ -160,6 +161,7 @@ impl Config {
             config: self.clone(),
             client,
         };
+
 
         // Set up auth routes. NOTE: CORs needs to allow for get requests to the
         // metadata information paths.

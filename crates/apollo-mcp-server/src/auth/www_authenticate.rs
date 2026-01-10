@@ -22,6 +22,7 @@ pub(super) enum BearerError {
     InsufficientScope,
 }
 
+
 impl Header for WwwAuthenticate {
     fn name() -> &'static http::HeaderName {
         &WWW_AUTHENTICATE

@@ -156,6 +156,8 @@ impl Starting {
             schema,
             operations: Arc::new(RwLock::new(operations)),
             apps,
+            #[cfg(feature = "apps")]
+            ui_apps_specs: self.config.ui_apps_specs.clone(),
             headers: self.config.headers,
             forward_headers: self.config.forward_headers.clone(),
             endpoint: self.config.endpoint,
@@ -380,6 +382,8 @@ mod tests {
                     ..Default::default()
                 },
                 cors: Default::default(),
+                #[cfg(feature = "apps")]
+                ui_apps_specs: vec![crate::apps::SpecFormat::OpenAi],
             },
             schema: Schema::parse_and_validate("type Query { hello: String }", "test.graphql")
                 .expect("Valid schema"),

@@ -19,6 +19,25 @@ mod execution;
 
 pub(crate) use execution::{find_and_execute_app, make_tool_private};
 
+/// Supported specification formats for UI apps
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+#[cfg_attr(feature = "apps", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum SpecFormat {
+    /// OpenAI Apps SDK (text/html+skybridge)
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// MCP Apps Specification (text/html;profile=mcp-app)
+    #[serde(rename = "mcp-apps")]
+    McpApps,
+}
+
+impl Default for SpecFormat {
+    fn default() -> Self {
+        Self::OpenAi
+    }
+}
+
 /// An app, which consists of a tool and a resource to be used together.
 #[derive(Clone, Debug)]
 pub(crate) struct App {
@@ -50,6 +69,66 @@ pub(crate) struct AppTool {
     pub(crate) operation: Arc<Operation>,
     /// The MCP tool definition
     pub(crate) tool: Tool,
+    /// Visibility settings for MCP Apps spec
+    pub(crate) visibility: Vec<ToolVisibility>,
+}
+
+impl AppTool {
+    /// Get tool with spec-specific metadata
+    pub(crate) fn tool_for_spec(&self, spec: SpecFormat, app_name: &str, uri: &str) -> Tool {
+        let meta = match spec {
+            SpecFormat::OpenAi => self.openai_metadata(uri),
+            SpecFormat::McpApps => self.mcp_metadata(app_name),
+        };
+
+        Tool {
+            name: self.tool.name.clone(),
+            meta: Some(meta),
+            description: self.tool.description.clone(),
+            input_schema: self.tool.input_schema.clone(),
+            title: self.tool.title.clone(),
+            output_schema: self.tool.output_schema.clone(),
+            annotations: self.tool.annotations.clone(),
+            icons: self.tool.icons.clone(),
+        }
+    }
+
+    /// Generate OpenAI Apps metadata
+    fn openai_metadata(&self, uri: &str) -> Meta {
+        let mut meta = Meta::new();
+        meta.insert("openai/outputTemplate".to_string(), uri.into());
+        meta.insert("openai/widgetAccessible".to_string(), true.into());
+        meta
+    }
+
+    /// Generate MCP Apps metadata
+    fn mcp_metadata(&self, app_name: &str) -> Meta {
+        let mut meta = Meta::new();
+        let mut ui_meta = Map::new();
+        let resource_uri = format!("ui://mcp/{}", app_name);
+
+        ui_meta.insert(
+            "resourceUri".to_string(),
+            resource_uri.clone().into()
+        );
+        ui_meta.insert(
+            "visibility".to_string(),
+            self.visibility.iter()
+                .map(|v| match v {
+                    ToolVisibility::Model => "model",
+                    ToolVisibility::App => "app",
+                })
+                .collect::<Vec<_>>()
+                .into()
+        );
+        meta.insert("ui".to_string(), ui_meta.into());
+
+        // BACKWARD COMPATIBILITY: Add deprecated format for Goose v1.19.0
+        // SEP-1865 deprecated this flat format, but Goose still uses it
+        meta.insert("ui/resourceUri".to_string(), resource_uri.into());
+
+        meta
+    }
 }
 
 /// An operation that should be executed for every invocation of an app.
@@ -62,14 +141,47 @@ pub(crate) struct PrefetchOperation {
 }
 
 impl App {
+    /// Get resource using default OpenAI format (for backward compatibility)
     pub(crate) fn resource(&self) -> Resource {
+        self.resource_openai()
+    }
+
+    /// Get resource for a specific spec format
+    pub(crate) fn resource_for_spec(&self, spec: SpecFormat) -> Resource {
+        match spec {
+            SpecFormat::OpenAi => self.resource_openai(),
+            SpecFormat::McpApps => self.resource_mcp(),
+        }
+    }
+
+    fn resource_openai(&self) -> Resource {
         Resource::new(
             RawResource {
                 name: self.name.clone(),
                 uri: self.uri.to_string(),
                 mime_type: Some("text/html+skybridge".to_string()),
-                // TODO: load all this from a manifest file
                 title: None,
+                description: None,
+                icons: None,
+                size: None,
+            },
+            None,
+        )
+    }
+
+    fn resource_mcp(&self) -> Resource {
+        // Convert ui://widget/name#hash to ui://mcp/name
+        let mcp_uri = self.uri.to_string()
+            .replace("ui://widget/", "ui://mcp/")
+            .split('#').next().unwrap_or(self.uri.as_ref())
+            .to_string();
+
+        Resource::new(
+            RawResource {
+                name: self.name.clone(),
+                uri: mcp_uri,
+                mime_type: Some("text/html;profile=mcp-app".to_string()),
+                title: Some(self.name.clone()),
                 description: None,
                 icons: None,
                 size: None,
@@ -182,11 +294,11 @@ pub(crate) fn load_from_path(
                 Ok(Some(op)) => Arc::new(op),
             };
 
-            for tool in operation_def.tools {
+            for tool_def in operation_def.tools {
                 let mut meta = meta.clone();
 
                 // Allow overriding the labels per tool
-                if let Some(labels) = tool.labels {
+                if let Some(labels) = tool_def.labels {
                     if let Some(tool_invocation_invoking) = labels.tool_invocation_invoking {
                         meta.insert(
                             "openai/toolInvocation/invoking".into(),
@@ -203,16 +315,16 @@ pub(crate) fn load_from_path(
                 }
 
                 let tool = Tool {
-                    name: format!("{name}--{}", tool.name).into(),
+                    name: format!("{name}--{}", tool_def.name).into(),
                     meta: Some(meta.clone()),
                     description: Some(
                         if let Some(app_description) = manifest.description.clone() {
-                            format!("{} {}", app_description, tool.description).into()
+                            format!("{} {}", app_description, tool_def.description).into()
                         } else {
-                            tool.description.into()
+                            tool_def.description.into()
                         },
                     ),
-                    input_schema: if let Some(extra_inputs) = tool.extra_inputs {
+                    input_schema: if let Some(extra_inputs) = tool_def.extra_inputs {
                         let mut merged = operation.tool.input_schema.as_ref().clone();
                         merge_inputs(&mut merged, extra_inputs)?;
                         Arc::new(merged)
@@ -228,6 +340,7 @@ pub(crate) fn load_from_path(
                 tools.push(AppTool {
                     operation: operation.clone(),
                     tool,
+                    visibility: tool_def.visibility.clone(),
                 })
             }
 
@@ -370,6 +483,20 @@ struct OperationDefinition {
     tools: Vec<ToolDefinition>,
 }
 
+/// Visibility settings for MCP Apps specification
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ToolVisibility {
+    /// Tool is callable by AI models/agents
+    Model,
+    /// Tool is callable only by apps
+    App,
+}
+
+fn default_visibility() -> Vec<ToolVisibility> {
+    vec![ToolVisibility::Model, ToolVisibility::App]
+}
+
 #[derive(Clone, Deserialize)]
 struct ToolDefinition {
     name: String,
@@ -377,6 +504,9 @@ struct ToolDefinition {
     #[serde(rename = "extraInputs", default)]
     extra_inputs: Option<Vec<ExtraInputDefinition>>,
     labels: Option<AppLabels>,
+    /// Visibility settings for MCP Apps spec (defaults to ["model", "app"])
+    #[serde(default = "default_visibility")]
+    visibility: Vec<ToolVisibility>,
 }
 
 #[derive(Clone, Deserialize)]

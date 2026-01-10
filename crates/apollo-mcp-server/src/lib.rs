@@ -1,5 +1,8 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[cfg(feature = "apps")]
+pub mod apps;
+#[cfg(not(feature = "apps"))]
 pub(crate) mod apps;
 pub(crate) mod auth;
 pub mod cors;

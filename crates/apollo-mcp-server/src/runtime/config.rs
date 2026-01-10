@@ -63,6 +63,36 @@ pub struct Config {
 
     /// The type of server transport to use
     pub transport: Transport,
+
+    /// UI apps configuration (optional, enabled by "apps" feature)
+    #[cfg(feature = "apps")]
+    pub ui_apps: Option<UiAppsConfig>,
+}
+
+#[cfg(feature = "apps")]
+/// Configuration for UI apps
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct UiAppsConfig {
+    /// Specification formats to enable for UI apps.
+    /// Defaults to ["openai"] for backward compatibility.
+    /// Valid values: "openai", "mcp-apps"
+    #[serde(default = "default_specs")]
+    pub specs: Vec<apollo_mcp_server::apps::SpecFormat>,
+}
+
+#[cfg(feature = "apps")]
+fn default_specs() -> Vec<apollo_mcp_server::apps::SpecFormat> {
+    vec![apollo_mcp_server::apps::SpecFormat::OpenAi]
+}
+
+#[cfg(feature = "apps")]
+impl Default for UiAppsConfig {
+    fn default() -> Self {
+        Self {
+            specs: default_specs(),
+        }
+    }
 }
 
 mod parsers {
@@ -131,5 +161,35 @@ mod test {
         let schema = schemars::schema_for!(Config).to_value().to_string();
 
         assert!(!schema.contains("__"))
+    }
+
+    #[cfg(feature = "apps")]
+    #[test]
+    fn it_parses_ui_apps_config_with_defaults() {
+        let config: Config = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(config.ui_apps.is_none());
+    }
+
+    #[cfg(feature = "apps")]
+    #[test]
+    fn it_parses_ui_apps_config_with_openai_only() {
+        let config: Config = serde_json::from_str(
+            r#"{"ui_apps": {"specs": ["openai"]}}"#
+        ).unwrap();
+        let ui_apps = config.ui_apps.unwrap();
+        assert_eq!(ui_apps.specs.len(), 1);
+        assert_eq!(ui_apps.specs[0], apollo_mcp_server::apps::SpecFormat::OpenAi);
+    }
+
+    #[cfg(feature = "apps")]
+    #[test]
+    fn it_parses_ui_apps_config_with_dual_spec() {
+        let config: Config = serde_json::from_str(
+            r#"{"ui_apps": {"specs": ["openai", "mcp-apps"]}}"#
+        ).unwrap();
+        let ui_apps = config.ui_apps.unwrap();
+        assert_eq!(ui_apps.specs.len(), 2);
+        assert_eq!(ui_apps.specs[0], apollo_mcp_server::apps::SpecFormat::OpenAi);
+        assert_eq!(ui_apps.specs[1], apollo_mcp_server::apps::SpecFormat::McpApps);
     }
 }
