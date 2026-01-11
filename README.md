@@ -1,6 +1,6 @@
 This is a testing playground version of Apollo MCP Server used by devrel. If you are looking for the official repo, [please navigate here](https://github.com/apollographql/apollo-mcp-server)
 
-This version of Apollo MCP Server has draft MCP App support and can be tested alongside this [MCP App repo](...)
+This version of Apollo MCP Server has draft MCP App support and can be tested alongside this [MCP App repo](https://github.com/amandamartin-dev/luma-analytics-mcp-app/tree/main)
 
 <div align="center">
 <a href="https://www.apollographql.com/"><img src="https://raw.githubusercontent.com/apollographql/apollo-client-devtools/main/assets/apollo-wordmark.svg" height="100" alt="Apollo Client"></a>
